@@ -3,7 +3,15 @@ import fs from 'fs';
 import path from 'path';
 import process from 'process';
 import { fileURLToPath } from 'url';
-import { BrowserPool, navigate, buildResult, fetchFastPath, isTransientNavError } from './index.js';
+import {
+  BrowserPool,
+  navigate,
+  buildResult,
+  fetchFastPath,
+  fetchBinaryFastPath,
+  waitForCloudflare,
+  isTransientNavError,
+} from './index.js';
 
 // ---------------------------------------------------------------------------
 // Config: .env file (if present) < process.env < CLI port arg.
@@ -44,6 +52,17 @@ const config = {
 const startedAt = Date.now();
 const pool = new BrowserPool({ size: config.poolSize, headless: config.headless });
 
+// Most-recently-harvested Cloudflare clearance (cookies + UA). Lets the binary
+// /binary endpoint fetch protected images via a plain fetch — no browser, fully
+// concurrent — instead of serializing every image through the size-1 pool.
+let lastClearance = { cookies: null, userAgent: null };
+
+function rememberClearance(cookies, userAgent) {
+  if (Array.isArray(cookies) && cookies.length) {
+    lastClearance = { cookies, userAgent: userAgent || lastClearance.userAgent };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -54,6 +73,16 @@ function sendJson(res, status, body) {
     'Content-Length': Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+function sendBinary(res, status, buffer, contentType) {
+  res.writeHead(status, {
+    'Content-Type': contentType || 'application/octet-stream',
+    'Content-Length': buffer.length,
+    // images are immutable content-addressed assets; let the caller cache hard
+    'Cache-Control': 'public, max-age=86400',
+  });
+  res.end(buffer);
 }
 
 function readBody(req) {
@@ -142,6 +171,8 @@ async function scrape(opts) {
           waitForSelector,
         });
         const result = await buildResult(slot.page, { returnType, screenshot });
+        // Harvest clearance so the binary fast-path can reuse it.
+        if (Array.isArray(result.cookies)) rememberClearance(result.cookies, result.userAgent);
         pool.release(slot);
         return result;
       } catch (err) {
@@ -152,6 +183,49 @@ async function scrape(opts) {
     throw lastErr;
   } catch (err) {
     await pool.replace(slot); // recreate the (possibly broken) slot, then release
+    throw err;
+  }
+}
+
+/**
+ * Fetches a (possibly Cloudflare-protected) binary resource — e.g. an image.
+ *
+ * Tries a plain fetch with the last-harvested clearance first (no browser, so
+ * many images resolve concurrently). Only when that's challenged does it lease
+ * the warm browser to solve the origin, then reads the real bytes from the
+ * navigation response and refreshes the cached clearance.
+ *
+ * @returns {Promise<{status:number,buffer:Buffer,contentType:string,via:string}>}
+ */
+async function fetchBinary(url, { timeout = config.navTimeout } = {}) {
+  // 1) Fast-path: plain fetch from this host using cached clearance.
+  if (lastClearance.cookies) {
+    const fast = await fetchBinaryFastPath(url, {
+      cookies: lastClearance.cookies,
+      userAgent: lastClearance.userAgent,
+      timeout,
+    });
+    if (fast) return fast;
+  }
+
+  // 2) Browser path: navigate (solving any challenge), then read the bytes.
+  const slot = await pool.acquire();
+  try {
+    let resp = await slot.page.goto(url, { waitUntil: 'domcontentloaded', timeout });
+    const ct = resp ? resp.headers()['content-type'] || '' : '';
+    const challenged = !resp || resp.status() === 403 || resp.status() === 503 || /text\/html/i.test(ct);
+    if (challenged) {
+      await waitForCloudflare(slot.page, timeout);
+      // Re-request now that clearance is set, to capture the real image bytes.
+      resp = await slot.page.goto(url, { waitUntil: 'networkidle2', timeout });
+    }
+    const buffer = await resp.buffer();
+    const contentType = resp.headers()['content-type'] || 'application/octet-stream';
+    rememberClearance(await slot.page.cookies(), await slot.page.evaluate(() => navigator.userAgent));
+    pool.release(slot);
+    return { status: resp.status(), buffer, contentType, via: 'browser' };
+  } catch (err) {
+    await pool.replace(slot);
     throw err;
   }
 }
@@ -176,6 +250,7 @@ const server = http.createServer(async (req, res) => {
       endpoints: {
         'GET /health': 'liveness + pool stats',
         'POST /v1': 'scrape a URL through a real browser (Cloudflare-aware)',
+        'POST /binary': 'fetch a Cloudflare-protected binary (e.g. image) and return the raw bytes; body: { url, timeout? }',
       },
       body: {
         url: 'string (required) — target URL',
@@ -220,6 +295,36 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (pathname === '/binary') {
+    if (req.method !== 'POST') {
+      return sendJson(res, 405, { error: 'Method not allowed. Use POST.' });
+    }
+    if (!authorized(req)) {
+      return sendJson(res, 401, { error: 'Unauthorized' });
+    }
+
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch {
+      return sendJson(res, 400, { error: 'Invalid JSON body' });
+    }
+
+    if (typeof body.url !== 'string' || !body.url.trim()) {
+      return sendJson(res, 400, { error: 'url is required' });
+    }
+
+    try {
+      const { status, buffer, contentType } = await fetchBinary(body.url.trim(), {
+        timeout: body.timeout,
+      });
+      return sendBinary(res, status >= 200 && status < 300 ? 200 : status, buffer, contentType);
+    } catch (err) {
+      return sendJson(res, 502, { error: String(err && err.message ? err.message : err) });
+    }
+  }
+
   return sendJson(res, 404, { error: 'Not found' });
 });
 
@@ -233,6 +338,7 @@ const server = http.createServer(async (req, res) => {
     console.log(`flareburner API listening on http://0.0.0.0:${config.port}`);
     console.log(`  GET  /health`);
     console.log(`  POST /v1   ${config.apiKey ? '(API key required)' : '(open)'}`);
+    console.log(`  POST /binary   (fetch protected image bytes)`);
     console.log(
       `Try: curl -X POST http://localhost:${config.port}/v1 -H "Content-Type: application/json" -d '{"url":"${config.defaultUrl}"}'`,
     );

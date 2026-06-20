@@ -365,6 +365,70 @@ export async function fetchFastPath(url, opts = {}) {
 }
 
 /**
+ * Like {@link fetchFastPath} but for binary resources (images, etc): does a
+ * plain HTTP fetch with the supplied cookies and returns the raw bytes as a
+ * Buffer. Returns `null` when Cloudflare challenges the request (HTML body /
+ * 403 / 503), signalling the caller to fall back to a real browser.
+ *
+ * cf_clearance is bound to IP + User-Agent, so this must run on the host that
+ * solved the cookies, with a matching `userAgent`.
+ *
+ * @param {string} url
+ * @param {object} [opts]
+ * @param {object[]} [opts.cookies]
+ * @param {string} [opts.userAgent]
+ * @param {object} [opts.headers]
+ * @param {number} [opts.timeout=20000]
+ * @returns {Promise<{url:string,status:number,buffer:Buffer,contentType:string,via:string}|null>}
+ */
+export async function fetchBinaryFastPath(url, opts = {}) {
+  const { cookies, userAgent, headers, timeout = 20000 } = opts;
+  const cookieHeader = (cookies || [])
+    .filter((c) => c && c.name)
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ');
+
+  let res;
+  try {
+    res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeout),
+      headers: {
+        'user-agent': userAgent || DEFAULT_UA,
+        accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
+        ...(headers && typeof headers === 'object' ? headers : {}),
+      },
+    });
+  } catch {
+    return null; // network/timeout — let the browser try
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  const challenged =
+    res.status === 403 ||
+    res.status === 503 ||
+    res.headers.get('cf-mitigated') === 'challenge' ||
+    // a challenge serves HTML instead of the image bytes
+    /text\/html/i.test(contentType);
+  if (challenged) return null;
+
+  let buffer;
+  try {
+    buffer = Buffer.from(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+  return {
+    url: res.url,
+    status: res.status,
+    buffer,
+    contentType: contentType || 'application/octet-stream',
+    via: 'fetch',
+  };
+}
+
+/**
  * Saves the page's cookies and full HTML into a JSON folder.
  *
  * @param {import('puppeteer-real-browser').ConnectResult['page']} page
