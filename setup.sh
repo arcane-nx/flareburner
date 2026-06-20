@@ -43,17 +43,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo ">> [1/6] System packages"
 apt-get update -y
+# Only the essentials here. Chrome's own shared-lib dependencies (libnss3,
+# libasound2/libasound2t64, libgbm1, …) are resolved automatically when apt
+# installs google-chrome-stable in step 3 — which avoids version-specific
+# package-name breakage (e.g. libasound2 -> libasound2t64 on Ubuntu 24.04).
 apt-get install -y \
   curl ca-certificates gnupg \
   xvfb \
-  fonts-liberation fonts-noto-color-emoji \
-  libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkb-common0 2>/dev/null || \
-apt-get install -y \
-  curl ca-certificates gnupg \
-  xvfb \
-  fonts-liberation fonts-noto-color-emoji \
-  libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-  libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxshmfence1 libasound2
+  fonts-liberation fonts-noto-color-emoji
 
 echo ">> [2/6] Node.js ${NODE_MAJOR}.x"
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt "${NODE_MAJOR}" ]]; then
@@ -73,9 +70,14 @@ if ! command -v google-chrome-stable >/dev/null 2>&1; then
 fi
 google-chrome-stable --version
 
-echo ">> [4/6] Project dependencies (pnpm)"
-corepack enable || npm install -g corepack
-su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && corepack pnpm install --prod"
+echo ">> [4/6] Project dependencies"
+# Prefer pnpm via corepack (uses the pinned packageManager in package.json);
+# fall back to npm so a corepack/pnpm hiccup never blocks the deploy.
+corepack enable 2>/dev/null || npm install -g corepack 2>/dev/null || true
+if ! su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && corepack pnpm install --prod"; then
+  echo "   pnpm unavailable — falling back to npm"
+  su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && npm install --omit=dev --no-audit --no-fund"
+fi
 
 echo ">> [5/6] Config (.env) + systemd service"
 # Seed a .env from the example on first run so config lives in one place.
@@ -107,14 +109,35 @@ WantedBy=multi-user.target
 EOF
 
 echo ">> [6/6] Starting service"
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
-systemctl restart "${SERVICE_NAME}"
-sleep 2
-systemctl --no-pager status "${SERVICE_NAME}" || true
+if [[ -d /run/systemd/system ]]; then
+  # Real systemd host (typical VPS).
+  systemctl daemon-reload
+  systemctl enable "${SERVICE_NAME}"
+  systemctl restart "${SERVICE_NAME}"
+  sleep 2
+  systemctl --no-pager status "${SERVICE_NAME}" || true
 
-echo
-echo ">> Done. flareburner is running on http://0.0.0.0:${PORT}"
-echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://animepahe.pw\"}'"
-echo "   Logs:  journalctl -u ${SERVICE_NAME} -f"
-echo "   Stop:  systemctl stop ${SERVICE_NAME}"
+  echo
+  echo ">> Done. flareburner is running on http://0.0.0.0:${PORT}"
+  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://animepahe.pw\"}'"
+  echo "   Logs:  journalctl -u ${SERVICE_NAME} -f"
+  echo "   Stop:  systemctl stop ${SERVICE_NAME}"
+else
+  # No systemd (Docker / dev container / Codespace). Run it with nohup instead.
+  echo "   systemd not available — starting with nohup (no auto-restart on reboot)."
+  PID_FILE="${PROJECT_DIR}/${SERVICE_NAME}.pid"
+  LOG_FILE="${PROJECT_DIR}/${SERVICE_NAME}.log"
+  # Stop a previous nohup instance if one is recorded.
+  if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+    kill "$(cat "${PID_FILE}")" 2>/dev/null || true
+    sleep 1
+  fi
+  su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && PORT='${PORT}' nohup node server.js >> '${LOG_FILE}' 2>&1 & echo \$! > '${PID_FILE}'"
+  sleep 2
+
+  echo
+  echo ">> Done. flareburner is running on http://0.0.0.0:${PORT}"
+  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://animepahe.pw\"}'"
+  echo "   Logs:  tail -f '${LOG_FILE}'"
+  echo "   Stop:  kill \$(cat '${PID_FILE}')"
+fi

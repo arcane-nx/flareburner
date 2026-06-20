@@ -7,6 +7,7 @@ node_modules/
 # Runtime output
 json/
 *.log
+*.pid
 
 # OS / editor
 .DS_Store
