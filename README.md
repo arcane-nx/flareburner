@@ -90,7 +90,7 @@ variables → CLI port argument**.
 | `POOL_SIZE`   | `1`                   | Number of warm Chrome instances = max concurrent requests. |
 | `HEADLESS`    | `false`               | Run Chrome headless. Cloudflare is harder to beat headless — keep `false` unless your target doesn't challenge. |
 | `NAV_TIMEOUT` | `60000`               | Navigation + Cloudflare-wait timeout, in ms. |
-| `DEFAULT_URL` | `https://animepahe.pw`| URL used when a request omits `url`. |
+| `DEFAULT_URL` | `https://nowsecure.nl`| URL used when a request omits `url`. |
 
 Example `.env`:
 
@@ -100,7 +100,7 @@ API_KEY=
 POOL_SIZE=2
 HEADLESS=false
 NAV_TIMEOUT=60000
-DEFAULT_URL=https://animepahe.pw
+DEFAULT_URL=https://nowsecure.nl
 ```
 
 > Changes to `.env` require a **server restart** (config is read once at startup).
@@ -127,13 +127,13 @@ The startup log will then show `POST /v1 (API key required)`.
 curl -X POST http://localhost:4001/v1 \
   -H "Content-Type: application/json" \
   -H "X-API-Key: my-super-secret-key" \
-  -d '{"url":"https://animepahe.pw"}'
+  -d '{"url":"https://nowsecure.nl"}'
 
 # Bearer form
 curl -X POST http://localhost:4001/v1 \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer my-super-secret-key" \
-  -d '{"url":"https://animepahe.pw"}'
+  -d '{"url":"https://nowsecure.nl"}'
 ```
 
 - **Missing / wrong key →** `401 {"error":"Unauthorized"}`.
@@ -178,7 +178,7 @@ Minimal:
 ```bash
 curl -X POST http://localhost:4001/v1 \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw"}'
+  -d '{"url":"https://nowsecure.nl"}'
 ```
 
 | Method other than POST | `405 Method not allowed` |
@@ -217,11 +217,11 @@ Every browser response includes `via: "browser"`; fast-path responses include
 
 ```json
 {
-  "url": "https://animepahe.pw/",
-  "title": "animepahe :: okay-ish anime website",
+  "url": "https://nowsecure.nl/",
+  "title": "nowSecure",
   "via": "browser",
   "userAgent": "Mozilla/5.0 …",
-  "cookies": [ { "name": "cf_clearance", "value": "…", "domain": "animepahe.pw", … } ],
+  "cookies": [ { "name": "cf_clearance", "value": "…", "domain": "nowsecure.nl", … } ],
   "html": "<!DOCTYPE html>…",
   "screenshot": "<base64 png, only if requested>"
 }
@@ -251,7 +251,7 @@ challenge. flareburner supports two reuse modes:
 ```bash
 # 1) solve once, save the response
 curl -s -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw"}' -o out.json
+  -d '{"url":"https://nowsecure.nl"}' -o out.json
 
 # 2) reuse — feed the file straight back
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
@@ -275,41 +275,41 @@ curl http://localhost:4001/health
 
 # Basic scrape (full)
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw"}'
+  -d '{"url":"https://nowsecure.nl"}'
 
 # HTML only
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","returnType":"html"}'
+  -d '{"url":"https://nowsecure.nl","returnType":"html"}'
 
 # Cookies only
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","returnType":"cookies"}'
+  -d '{"url":"https://nowsecure.nl","returnType":"cookies"}'
 
-# JSON endpoint
+# JSON endpoint (parses the page body as JSON; falls back to html if it isn't)
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw/api?m=airing","returnType":"json"}'
+  -d '{"url":"https://httpbin.org/json","returnType":"json"}'
 
 # Screenshot -> save PNG (no jq; uses node)
 curl -s -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","screenshot":true}' -o shot.json
+  -d '{"url":"https://nowsecure.nl","screenshot":true}' -o shot.json
 node -e "require('fs').writeFileSync('shot.png',Buffer.from(require('./shot.json').screenshot,'base64'))"
 
 # Custom UA + headers
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","userAgent":"MyBot/1.0","headers":{"Accept-Language":"en-US"}}'
+  -d '{"url":"https://nowsecure.nl","userAgent":"MyBot/1.0","headers":{"Accept-Language":"en-US"}}'
 
 # Wait for a selector
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","waitForSelector":".navbar","timeout":45000}'
+  -d '{"url":"https://nowsecure.nl","waitForSelector":"h1","timeout":45000}'
 
 # Force browser (skip fast-path)
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
-  -d '{"url":"https://animepahe.pw","fastPath":false}'
+  -d '{"url":"https://nowsecure.nl","fastPath":false}'
 
 # With API key (if enabled)
 curl -X POST http://localhost:4001/v1 \
   -H "Content-Type: application/json" -H "X-API-Key: YOUR_KEY" \
-  -d '{"url":"https://animepahe.pw"}'
+  -d '{"url":"https://nowsecure.nl"}'
 ```
 
 Handy flags: add `-i` to see status + headers, or
@@ -324,7 +324,7 @@ status code.
 and HTML to a `json/` folder:
 
 ```bash
-node index.js https://animepahe.pw
+node index.js https://nowsecure.nl
 # -> json/cookies.json   (array of cookies)
 # -> json/page.json      ({ url, html })
 ```
@@ -333,11 +333,48 @@ A URL argument is required.
 
 ---
 
-## Deploying to a Linux VPS
+## Deploying
 
-`setup.sh` provisions an **Ubuntu/Debian** server end-to-end: installs Node,
-Google Chrome, Xvfb and dependencies, seeds `.env`, and runs the API as a
-`systemd` service that restarts on crash/reboot.
+Two options — pick whichever fits your host:
+
+| Option | Best for | Auto-restart |
+|--------|----------|--------------|
+| **A. Docker** | Anywhere with Docker (laptop, VPS, PaaS, CI). Most portable. | yes (`restart: unless-stopped`) |
+| **B. VPS script** (`setup.sh`) | A bare Ubuntu/Debian box you control. Installs onto the host directly. | yes (systemd) |
+
+### Option A — Docker
+
+Everything (Chrome, Xvfb, fonts, deps) is baked into the image.
+
+```bash
+# docker compose (recommended)
+docker compose up -d --build
+docker compose logs -f
+docker compose down
+
+# or plain docker
+docker build -t flareburner .
+docker run -d --name flareburner -p 4001:4001 --shm-size=1g flareburner
+```
+
+Configure via environment variables (see the [config table](#configuration-env)) —
+edit `docker-compose.yml`, or pass `-e`:
+
+```bash
+docker run -d -p 4001:4001 --shm-size=1g \
+  -e POOL_SIZE=2 -e API_KEY=change-me flareburner
+```
+
+> **`--shm-size=1g`** matters: Docker's default 64 MB `/dev/shm` can crash Chrome.
+> compose sets `shm_size: "1gb"` for you; with plain `docker run`, pass the flag.
+> The image also launches Chrome with `--disable-dev-shm-usage` as a safety net.
+
+### Option B — Linux VPS script (`setup.sh`)
+
+`setup.sh` provisions an **Ubuntu/Debian** host end-to-end: installs Node, Google
+Chrome, Xvfb and dependencies, seeds `.env`, and runs the API as a `systemd`
+service. If systemd isn't available (e.g. a dev container / Codespace) it falls
+back to launching with `nohup`.
 
 > It only runs on Linux. On Windows/macOS it exits with a message — for local
 > dev just use `node server.js`.
@@ -348,7 +385,7 @@ sudo bash setup.sh                 # serves on :4001
 PORT=8080 sudo bash setup.sh       # different port
 ```
 
-Manage the service:
+Manage the systemd service:
 
 ```bash
 systemctl status flareburner       # state
@@ -357,8 +394,11 @@ systemctl restart flareburner      # after editing .env
 systemctl stop flareburner         # stop
 ```
 
-Open the firewall / port if reaching it externally (e.g. `sudo ufw allow 4001`),
-and ideally put it behind nginx with TLS — especially when using `API_KEY`.
+(no-systemd fallback: logs in `flareburner.log`, stop with `kill $(cat flareburner.pid)`.)
+
+For either option, open the firewall / port if reaching it externally
+(e.g. `sudo ufw allow 4001`), and ideally put it behind nginx with TLS —
+especially when using `API_KEY`.
 
 ---
 
@@ -373,6 +413,7 @@ and ideally put it behind nginx with TLS — especially when using `API_KEY`.
 | Reused cookies still get challenged | `cf_clearance` is IP+UA bound — reuse from the same IP and send the matching `userAgent`. The server falls back to the browser anyway. |
 | `setup.sh` does nothing on Windows | It's a Linux deploy script. Run `node server.js` locally; run `setup.sh` on the VPS. |
 | Browser won't launch on the VPS | Chrome needs `--no-sandbox` (already set) and Xvfb (installed by `setup.sh`). Check `journalctl -u flareburner`. |
+| Chrome crashes in Docker (`Target closed` / SIGTRAP) | `/dev/shm` too small — run with `--shm-size=1g` (compose already sets it). |
 
 ---
 
@@ -386,6 +427,7 @@ and ideally put it behind nginx with TLS — especially when using `API_KEY`.
 - **`server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`, and
   `POST /v1` with API-key auth, fast-path-then-pool scraping, and graceful
   shutdown.
-- **`setup.sh`** — Ubuntu/Debian provisioning + `systemd` service.
+- **`setup.sh`** — Ubuntu/Debian provisioning + `systemd` service (nohup fallback).
+- **`Dockerfile` / `docker-compose.yml`** — containerized deploy (Chrome + Xvfb baked in).
 - **`.env.example`** — documented config template.
 ```

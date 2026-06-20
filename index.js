@@ -121,7 +121,7 @@ export async function connectBrowser({ headless = false } = {}) {
       ({ browser, page } = await connect({
         headless,
         turnstile: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         customConfig: chromePath ? { chromePath } : {},
       }));
       return { browser, page };

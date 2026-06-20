@@ -38,7 +38,7 @@ const config = {
   poolSize: num(env.POOL_SIZE, 1),
   headless: bool(env.HEADLESS, false),
   navTimeout: num(env.NAV_TIMEOUT, 60000),
-  defaultUrl: env.DEFAULT_URL || 'https://animepahe.pw',
+  defaultUrl: env.DEFAULT_URL || 'https://nowsecure.nl',
 };
 
 const startedAt = Date.now();

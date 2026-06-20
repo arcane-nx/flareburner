@@ -119,7 +119,7 @@ if [[ -d /run/systemd/system ]]; then
 
   echo
   echo ">> Done. flareburner is running on http://0.0.0.0:${PORT}"
-  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://animepahe.pw\"}'"
+  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://nowsecure.nl\"}'"
   echo "   Logs:  journalctl -u ${SERVICE_NAME} -f"
   echo "   Stop:  systemctl stop ${SERVICE_NAME}"
 else
@@ -137,7 +137,7 @@ else
 
   echo
   echo ">> Done. flareburner is running on http://0.0.0.0:${PORT}"
-  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://animepahe.pw\"}'"
+  echo "   Test:  curl -X POST http://localhost:${PORT}/v1 -H 'Content-Type: application/json' -d '{\"url\":\"https://nowsecure.nl\"}'"
   echo "   Logs:  tail -f '${LOG_FILE}'"
   echo "   Stop:  kill \$(cat '${PID_FILE}')"
 fi
