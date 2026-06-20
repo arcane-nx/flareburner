@@ -50,7 +50,7 @@ Use it like an API: `POST` a URL, get back the solved page.
 ## Install
 
 ```bash
-pnpm install      # or: npm install
+npm install
 ```
 
 ## Run it

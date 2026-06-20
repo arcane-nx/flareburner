@@ -10,21 +10,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "packageManager": "pnpm@11.8.0",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "^11.8.0",
-      "onFail": "download"
-    }
-  },
   "type": "module",
   "dependencies": {
     "puppeteer-real-browser": "^1.4.4"
-  },
-  "pnpm": {
-    "ignoredBuiltDependencies": [
-      "sleep"
-    ]
   }
 }

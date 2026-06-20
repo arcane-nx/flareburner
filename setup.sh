@@ -71,13 +71,9 @@ fi
 google-chrome-stable --version
 
 echo ">> [4/6] Project dependencies"
-# Prefer pnpm via corepack (uses the pinned packageManager in package.json);
-# fall back to npm so a corepack/pnpm hiccup never blocks the deploy.
-corepack enable 2>/dev/null || npm install -g corepack 2>/dev/null || true
-if ! su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && corepack pnpm install --prod"; then
-  echo "   pnpm unavailable — falling back to npm"
-  su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && npm install --omit=dev --no-audit --no-fund"
-fi
+# --ignore-scripts skips native build steps (e.g. the optional `sleep` addon),
+# so no compiler toolchain is required on the host.
+su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && npm install --omit=dev --ignore-scripts --no-audit --no-fund"
 
 echo ">> [5/6] Config (.env) + systemd service"
 # Seed a .env from the example on first run so config lives in one place.

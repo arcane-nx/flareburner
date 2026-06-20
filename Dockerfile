@@ -23,12 +23,11 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install production deps first for better layer caching. Uses the pinned
-# packageManager (pnpm@11.8.0) from package.json via corepack.
-RUN corepack enable
-COPY package.json pnpm-lock.yaml ./
-RUN corepack prepare pnpm@11.8.0 --activate \
- && pnpm install --prod --frozen-lockfile
+# Install production deps first for better layer caching. --ignore-scripts
+# skips native build steps (e.g. the optional `sleep` addon) so no compiler
+# toolchain is needed in the image.
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev --ignore-scripts --no-audit --no-fund
 
 # App source.
 COPY index.js server.js .env.example ./
