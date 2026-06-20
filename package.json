@@ -21,5 +21,10 @@
   "type": "module",
   "dependencies": {
     "puppeteer-real-browser": "^1.4.4"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "sleep"
+    ]
   }
 }
