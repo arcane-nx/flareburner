@@ -9,6 +9,7 @@ Use it like an API: `POST` a URL, get back the solved page.
 - Warm **browser pool** — Chrome stays running between requests (fast, handles concurrency).
 - **Cookie reuse / fast-path** — replay a previous `cf_clearance` and skip the browser when possible.
 - **Per-request options** — choose what's returned (html / cookies / json), take screenshots, set headers, etc.
+- **Binary passthrough** — `POST /binary` fetches a Cloudflare-protected image (or any binary) and streams back the **raw bytes**, reusing harvested clearance so most hits skip the browser.
 - **Health endpoint + optional API key** — safe to expose.
 
 ---
@@ -24,6 +25,7 @@ Use it like an API: `POST` a URL, get back the solved page.
   - [`GET /health`](#get-health)
   - [`GET /`](#get-)
   - [`POST /v1`](#post-v1)
+  - [`POST /binary`](#post-binary)
 - [Request body options](#request-body-options)
 - [Response shapes](#response-shapes)
 - [Cookie reuse & the fast-path](#cookie-reuse--the-fast-path)
@@ -186,6 +188,54 @@ curl -X POST http://localhost:4001/v1 \
 | Body isn't valid JSON  | `400 Invalid JSON body` |
 | Unknown route          | `404 Not found` |
 | Scrape failed          | `500 {"error": "..."}` |
+
+### `POST /binary`
+
+Fetch a **Cloudflare-protected binary** — typically an image — and stream back
+the **raw bytes** (not JSON, not HTML). Same auth as `/v1`.
+
+This exists because `/v1` only ever returns text (html / cookies / json), and a
+`cf_clearance` is bound to the **solving host's IP**, so a caller on another
+machine can't reuse flareburner's cookies for its own direct image fetch. Route
+the image through `/binary` instead and flareburner fetches it from its own IP.
+
+**How it resolves (cheap first, browser only if needed):**
+
+1. **Fast-path (no Chrome).** A plain `fetch` from flareburner's host using the
+   most-recently-harvested clearance (cookies + UA from the last solve). Most
+   images come back this way — concurrently, without touching the size-limited
+   browser pool.
+2. **Browser fallback.** If the fast-path is challenged, it leases a warm
+   browser, navigates to the resource to solve the origin, reads the real bytes
+   from the navigation response, and refreshes the cached clearance so
+   subsequent images go back to the fast-path.
+
+JSON body:
+
+| Field     | Type   | Default       | Description |
+|-----------|--------|---------------|-------------|
+| `url`     | string | *(required)*  | The binary/image URL to fetch. |
+| `timeout` | number | `NAV_TIMEOUT` | Fetch + challenge timeout, in ms. |
+
+The response is the raw resource with its upstream `Content-Type` and a
+`Cache-Control: public, max-age=86400` header.
+
+```bash
+# Fetch a protected image and save it
+curl -X POST http://localhost:4001/binary \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://i.animepahe.pw/uploads/snapshots/xxxx.sm.webp"}' \
+  -o image.webp
+```
+
+| Method other than POST   | `405 Method not allowed` |
+|---|---|
+| Body isn't valid JSON    | `400 Invalid JSON body` |
+| Missing `url`            | `400 {"error":"url is required"}` |
+| Fetch failed / challenged| `502 {"error": "..."}` |
+
+> Best for content-addressed assets (images, fonts) where the bytes matter. For
+> HTML/JSON pages use [`POST /v1`](#post-v1).
 
 ---
 
@@ -422,11 +472,12 @@ especially when using `API_KEY`.
 - **`index.js`** — library: `resolveChromePath`, `connectBrowser` (with launch
   retries), `navigate` (cookies/UA/headers + `waitForCloudflare` + settle),
   `buildResult` (shapes the response), `BrowserPool` (warm, queued slots),
-  `fetchFastPath` (cookie-only `fetch`), and `save` (CLI dump). Also runnable as
-  a CLI.
-- **`server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`, and
-  `POST /v1` with API-key auth, fast-path-then-pool scraping, and graceful
-  shutdown.
+  `fetchFastPath` (cookie-only `fetch`), `fetchBinaryFastPath` (cookie-only
+  `fetch` returning raw bytes), and `save` (CLI dump). Also runnable as a CLI.
+- **`server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`,
+  `POST /v1` with API-key auth (fast-path-then-pool scraping), `POST /binary`
+  (clearance-reusing binary/image fetch), and graceful shutdown. Tracks the
+  last-harvested clearance so `/binary` can skip the browser.
 - **`setup.sh`** — Ubuntu/Debian provisioning + `systemd` service (nohup fallback).
 - **`Dockerfile` / `docker-compose.yml`** — containerized deploy (Chrome + Xvfb baked in).
 - **`.env.example`** — documented config template.

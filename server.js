@@ -9,6 +9,7 @@ import {
   buildResult,
   fetchFastPath,
   fetchBinaryFastPath,
+  fetchProxyFastPath,
   waitForCloudflare,
   isTransientNavError,
 } from './index.js';
@@ -230,6 +231,62 @@ async function fetchBinary(url, { timeout = config.navTimeout } = {}) {
   }
 }
 
+/**
+ * General-purpose Cloudflare-solving proxy. Runs an arbitrary HTTP request
+ * (method / headers / body / redirect mode) FROM this host using the harvested
+ * clearance, so callers can drive multi-step flows — e.g. a kwik form POST that
+ * 302s to the real media URL — without ever holding cf_clearance themselves
+ * (it's bound to this host's IP + UA).
+ *
+ * Tries the plain-fetch fast-path with cached clearance first; if Cloudflare
+ * challenges, it leases the warm browser to solve the request's ORIGIN, harvests
+ * fresh clearance, then replays the real request via the fast-path.
+ *
+ * @returns {Promise<{url:string,status:number,headers:object,setCookie:string[],body:string,via:string}>}
+ */
+async function fetchProxy(url, opts = {}) {
+  const { method = 'GET', headers, body, redirect = 'follow', timeout = config.navTimeout } = opts;
+
+  const tryFast = (clearance) =>
+    fetchProxyFastPath(url, {
+      cookies: clearance.cookies,
+      userAgent: clearance.userAgent,
+      method,
+      headers,
+      body,
+      redirect,
+      timeout,
+    });
+
+  // 1) Fast-path with whatever clearance we last harvested.
+  if (lastClearance.cookies) {
+    const fast = await tryFast(lastClearance);
+    if (fast) return fast;
+  }
+
+  // 2) Browser: solve Cloudflare for this origin, harvest clearance, then replay.
+  const origin = new URL(url).origin;
+  const slot = await pool.acquire();
+  let clearance;
+  try {
+    await slot.page.goto(origin, { waitUntil: 'domcontentloaded', timeout });
+    await waitForCloudflare(slot.page, timeout);
+    clearance = {
+      cookies: await slot.page.cookies(),
+      userAgent: await slot.page.evaluate(() => navigator.userAgent),
+    };
+    rememberClearance(clearance.cookies, clearance.userAgent);
+    pool.release(slot);
+  } catch (err) {
+    await pool.replace(slot);
+    throw err;
+  }
+
+  const fast = await tryFast(clearance);
+  if (fast) return fast;
+  throw new Error('fetch challenged even after solving Cloudflare');
+}
+
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
@@ -251,6 +308,7 @@ const server = http.createServer(async (req, res) => {
         'GET /health': 'liveness + pool stats',
         'POST /v1': 'scrape a URL through a real browser (Cloudflare-aware)',
         'POST /binary': 'fetch a Cloudflare-protected binary (e.g. image) and return the raw bytes; body: { url, timeout? }',
+        'POST /fetch': 'general Cloudflare-solving proxy; runs an arbitrary request from this host and returns { status, headers, setCookie, body }; body: { url, method?, headers?, body?, redirect?, timeout? }',
       },
       body: {
         url: 'string (required) — target URL',
@@ -325,6 +383,40 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (pathname === '/fetch') {
+    if (req.method !== 'POST') {
+      return sendJson(res, 405, { error: 'Method not allowed. Use POST.' });
+    }
+    if (!authorized(req)) {
+      return sendJson(res, 401, { error: 'Unauthorized' });
+    }
+
+    let body = {};
+    try {
+      const raw = await readBody(req);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch {
+      return sendJson(res, 400, { error: 'Invalid JSON body' });
+    }
+
+    if (typeof body.url !== 'string' || !body.url.trim()) {
+      return sendJson(res, 400, { error: 'url is required' });
+    }
+
+    try {
+      const result = await fetchProxy(body.url.trim(), {
+        method: body.method,
+        headers: body.headers,
+        body: body.body,
+        redirect: body.redirect,
+        timeout: body.timeout,
+      });
+      return sendJson(res, 200, result);
+    } catch (err) {
+      return sendJson(res, 502, { error: String(err && err.message ? err.message : err) });
+    }
+  }
+
   return sendJson(res, 404, { error: 'Not found' });
 });
 
@@ -339,6 +431,7 @@ const server = http.createServer(async (req, res) => {
     console.log(`  GET  /health`);
     console.log(`  POST /v1   ${config.apiKey ? '(API key required)' : '(open)'}`);
     console.log(`  POST /binary   (fetch protected image bytes)`);
+    console.log(`  POST /fetch    (general Cloudflare-solving proxy)`);
     console.log(
       `Try: curl -X POST http://localhost:${config.port}/v1 -H "Content-Type: application/json" -d '{"url":"${config.defaultUrl}"}'`,
     );

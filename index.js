@@ -429,6 +429,97 @@ export async function fetchBinaryFastPath(url, opts = {}) {
 }
 
 /**
+ * Like {@link fetchFastPath} but a general-purpose proxy: forwards an arbitrary
+ * method / body / redirect mode and returns the status, response headers
+ * (with set-cookie preserved as an array) and the text body. Used by the
+ * `/fetch` endpoint so callers can run multi-step flows (e.g. a 302-capturing
+ * form POST) through flareburner's solved Cloudflare clearance.
+ *
+ * The supplied `cookies` are flareburner's harvested clearance; they are MERGED
+ * with any `cookie` header the caller sent (the caller's session cookies still
+ * matter), but the caller's `user-agent` is dropped — cf_clearance is bound to
+ * the UA that solved it, so we always present the clearance UA.
+ *
+ * Returns `null` when Cloudflare challenges the request, signalling the caller
+ * to solve via a real browser and retry. A 3xx under `redirect: 'manual'` is
+ * the expected success (we want the Location), not a challenge.
+ *
+ * @param {string} url
+ * @param {object} [opts]
+ * @param {object[]} [opts.cookies] Harvested clearance cookies.
+ * @param {string} [opts.userAgent] Clearance User-Agent (forced).
+ * @param {string} [opts.method='GET']
+ * @param {object} [opts.headers] Caller headers (cookie merged, user-agent dropped).
+ * @param {string} [opts.body] Request body.
+ * @param {'follow'|'manual'|'error'} [opts.redirect='follow']
+ * @param {number} [opts.timeout=20000]
+ * @returns {Promise<{url:string,status:number,headers:object,setCookie:string[],body:string,via:string}|null>}
+ */
+export async function fetchProxyFastPath(url, opts = {}) {
+  const {
+    cookies,
+    userAgent,
+    method = 'GET',
+    headers,
+    body,
+    redirect = 'follow',
+    timeout = 20000,
+  } = opts;
+
+  const clearanceCookie = (cookies || [])
+    .filter((c) => c && c.name)
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ');
+
+  // Split the caller's headers: keep its cookie (merge), drop its user-agent.
+  let callerCookie = '';
+  const passthrough = {};
+  for (const [k, v] of Object.entries(headers && typeof headers === 'object' ? headers : {})) {
+    const lk = k.toLowerCase();
+    if (lk === 'cookie') callerCookie = v;
+    else if (lk === 'user-agent') continue;
+    else passthrough[lk] = v;
+  }
+  const mergedCookie = [clearanceCookie, callerCookie].filter(Boolean).join('; ');
+
+  let res;
+  let text;
+  try {
+    res = await fetch(url, {
+      method,
+      redirect,
+      body: body != null ? body : undefined,
+      signal: AbortSignal.timeout(timeout),
+      headers: {
+        'user-agent': userAgent || DEFAULT_UA,
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ...(mergedCookie ? { cookie: mergedCookie } : {}),
+        ...passthrough,
+      },
+    });
+    text = await res.text();
+  } catch {
+    return null; // network/timeout — let the browser try
+  }
+
+  const isRedirect = res.status >= 300 && res.status < 400;
+  const challenged =
+    (!isRedirect && (res.status === 403 || res.status === 503)) ||
+    res.headers.get('cf-mitigated') === 'challenge' ||
+    /just a moment|__cf_chl|challenge-platform|cf-browser-verification/i.test(text);
+  if (challenged) return null;
+
+  // Flatten headers; preserve multiple set-cookie values as an array (iterating
+  // res.headers comma-joins them, which corrupts cookie values).
+  const headersObj = {};
+  for (const [k, v] of res.headers) headersObj[k] = v;
+  const setCookie =
+    typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+
+  return { url: res.url, status: res.status, headers: headersObj, setCookie, body: text, via: 'fetch' };
+}
+
+/**
  * Saves the page's cookies and full HTML into a JSON folder.
  *
  * @param {import('puppeteer-real-browser').ConnectResult['page']} page
