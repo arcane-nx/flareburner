@@ -1,24 +1,31 @@
 # flareburner
 
 A small HTTP API that opens pages in a **real Chrome browser** to get past
-Cloudflare ("Just a moment…") challenges, then returns the page's **cookies**
-and **HTML**. Built on [`puppeteer-real-browser`](https://www.npmjs.com/package/puppeteer-real-browser).
+Cloudflare ("Just a moment…") challenges, then hands you back the page's
+**cookies** and **HTML** — or raw image bytes, or the result of any request you
+want routed through it. Built on
+[`puppeteer-real-browser`](https://www.npmjs.com/package/puppeteer-real-browser).
 
 Use it like an API: `POST` a URL, get back the solved page.
 
 - Warm **browser pool** — Chrome stays running between requests (fast, handles concurrency).
 - **Cookie reuse / fast-path** — replay a previous `cf_clearance` and skip the browser when possible.
 - **Per-request options** — choose what's returned (html / cookies / json), take screenshots, set headers, etc.
-- **Binary passthrough** — `POST /binary` fetches a Cloudflare-protected image (or any binary) and streams back the **raw bytes**, reusing harvested clearance so most hits skip the browser.
+- **Binary passthrough** (`POST /binary`) — fetch a Cloudflare-protected image (or any binary) and stream back the **raw bytes**.
+- **General proxy** (`POST /fetch`) — run any request (method/headers/body) from flareburner's host using its solved clearance.
 - **Health endpoint + optional API key** — safe to expose.
 
 ---
 
 ## Table of contents
 
-- [Requirements](#requirements)
-- [Install](#install)
-- [Run it](#run-it)
+- [Quick start (from scratch)](#quick-start-from-scratch)
+  - [Step 1 — Get the code](#step-1--get-the-code)
+  - [Step 2 — Install the prerequisites](#step-2--install-the-prerequisites)
+  - [Step 3 — Install dependencies](#step-3--install-dependencies)
+  - [Step 4 — Start the server](#step-4--start-the-server)
+  - [Step 5 — Make your first request](#step-5--make-your-first-request)
+- [Even easier: run with Docker](#even-easier-run-with-docker)
 - [Configuration (.env)](#configuration-env)
 - [The secret key (API auth)](#the-secret-key-api-auth)
 - [API reference](#api-reference)
@@ -26,57 +33,130 @@ Use it like an API: `POST` a URL, get back the solved page.
   - [`GET /`](#get-)
   - [`POST /v1`](#post-v1)
   - [`POST /binary`](#post-binary)
-- [Request body options](#request-body-options)
-- [Response shapes](#response-shapes)
+  - [`POST /fetch`](#post-fetch)
+- [Request body options (`/v1`)](#request-body-options-v1)
+- [Response shapes (`/v1`)](#response-shapes-v1)
 - [Cookie reuse & the fast-path](#cookie-reuse--the-fast-path)
 - [curl cookbook](#curl-cookbook)
 - [CLI (no server)](#cli-no-server)
-- [Deploying to a Linux VPS](#deploying-to-a-linux-vps)
+- [Deploying to a server](#deploying-to-a-server)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
 
 ---
 
-## Requirements
+## Quick start (from scratch)
 
-- **Node.js 18+** (20+ recommended — uses global `fetch` and `AbortSignal.timeout`).
-- **Google Chrome / Chromium** installed.
-  - Linux: `/usr/bin/google-chrome-stable` (what the VPS script installs).
-  - Windows: a Playwright Chromium download under `…\AppData\Local\ms-playwright\` is auto-detected.
-  - Detection logic lives in `resolveChromePath()` in `index.js` (checks the standard Linux Chrome paths, then the local Playwright Chromium folder).
+New here? Follow these five steps in order and you'll have a working API in a
+few minutes. (If you have Docker, the [Docker route](#even-easier-run-with-docker)
+is even shorter — it installs Chrome for you.)
 
-> On a headless Linux server the non-headless browser needs a virtual display
-> (Xvfb). `puppeteer-real-browser` starts it automatically; the deploy script
-> installs the `xvfb` package for you.
+### Step 1 — Get the code
 
-## Install
+Clone the repository and move into the folder:
+
+```bash
+git clone https://github.com/arcane-nx/flareburner.git
+cd flareburner
+```
+
+### Step 2 — Install the prerequisites
+
+You need two things on your machine:
+
+1. **Node.js 18 or newer** (20+ recommended). Check with:
+   ```bash
+   node -v
+   ```
+   If it's missing or too old, install it from [nodejs.org](https://nodejs.org/).
+
+2. **Google Chrome (or Chromium).** flareburner drives a *real* Chrome, so one
+   must be installed:
+   - **Windows / macOS:** just install [Google Chrome](https://www.google.com/chrome/) normally.
+   - **Linux server:** install `google-chrome-stable` (the [VPS script](#deploying-to-a-server) does this for you).
+
+   flareburner finds Chrome automatically (`resolveChromePath()` in `index.js`
+   checks the standard locations).
+
+> **On a headless Linux server** the visible browser needs a virtual display
+> (Xvfb). `puppeteer-real-browser` starts it for you; the deploy script and the
+> Docker image install the `xvfb` package.
+
+### Step 3 — Install dependencies
 
 ```bash
 npm install
 ```
 
-## Run it
+### Step 4 — Start the server
 
 ```bash
-node server.js            # listens on http://localhost:4001
-node server.js 8080       # override the port via CLI arg
-npm start                 # same as: node server.js
+node server.js
 ```
 
-On startup you'll see whether auth is on:
+You should see:
 
 ```
 flareburner: warming 1 browser(s) (headless=false)…
 flareburner API listening on http://0.0.0.0:4001
   GET  /health
-  POST /v1   (open)        <-- or "(API key required)" when a key is set
+  POST /v1   (open)
+  POST /binary   (fetch protected image bytes)
+  POST /fetch    (general Cloudflare-solving proxy)
 ```
+
+That `(open)` means no API key is set yet — anyone who can reach the port can
+use it. See [the secret key](#the-secret-key-api-auth) to lock it down.
+
+Other ways to start it:
+
+```bash
+node server.js 8080   # override the port
+npm start             # same as: node server.js
+```
+
+### Step 5 — Make your first request
+
+In a **second terminal**, send a URL and get the solved page back:
+
+```bash
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://nowsecure.nl"}'
+```
+
+You'll get JSON containing the page `title`, its `cookies` (including
+`cf_clearance` if Cloudflare was solved), and the page `html`. 🎉
+
+That's it — you're running. The rest of this README is reference material for
+when you want to do more.
+
+---
+
+## Even easier: run with Docker
+
+If you have Docker, you don't need to install Node or Chrome at all — they're
+baked into the image.
+
+```bash
+git clone https://github.com/arcane-nx/flareburner.git
+cd flareburner
+
+docker compose up -d --build      # build + start in the background
+docker compose logs -f            # watch the logs
+```
+
+Then make the same [first request](#step-5--make-your-first-request) against
+`http://localhost:4001/v1`. To stop it: `docker compose down`.
+
+More Docker detail (env vars, `--shm-size`, plain `docker run`) is in
+[Deploying](#deploying-to-a-server).
 
 ---
 
 ## Configuration (.env)
 
-Copy the example and edit it:
+All settings are optional. To change them, copy the example file and edit it:
 
 ```bash
 cp .env.example .env
@@ -88,11 +168,11 @@ variables → CLI port argument**.
 | Variable      | Default               | Description |
 |---------------|-----------------------|-------------|
 | `PORT`        | `4001`                | HTTP port. (CLI arg `node server.js <port>` overrides everything.) |
-| `API_KEY`     | *(empty)*             | If set, `POST /v1` requires this key. Empty = open. |
-| `POOL_SIZE`   | `1`                   | Number of warm Chrome instances = max concurrent requests. |
+| `API_KEY`     | *(empty)*             | If set, `POST /v1`, `/binary` and `/fetch` require this key. Empty = open. |
+| `POOL_SIZE`   | `1`                   | Number of warm Chrome instances = max concurrent browser requests. |
 | `HEADLESS`    | `false`               | Run Chrome headless. Cloudflare is harder to beat headless — keep `false` unless your target doesn't challenge. |
 | `NAV_TIMEOUT` | `60000`               | Navigation + Cloudflare-wait timeout, in ms. |
-| `DEFAULT_URL` | `https://nowsecure.nl`| URL used when a request omits `url`. |
+| `DEFAULT_URL` | `https://nowsecure.nl`| URL used when a `/v1` request omits `url`. |
 
 Example `.env`:
 
@@ -111,8 +191,8 @@ DEFAULT_URL=https://nowsecure.nl
 
 ## The secret key (API auth)
 
-`API_KEY` is an optional shared secret that protects the `POST /v1` endpoint.
-`GET /health` and `GET /` stay open regardless.
+`API_KEY` is an optional shared secret that protects the `POST` endpoints
+(`/v1`, `/binary`, `/fetch`). `GET /health` and `GET /` stay open regardless.
 
 **Enable it:** set a value in `.env` and restart:
 
@@ -122,7 +202,7 @@ API_KEY=my-super-secret-key
 
 The startup log will then show `POST /v1 (API key required)`.
 
-**Send the key** with every `/v1` request — either header works:
+**Send the key** with every protected request — either header works:
 
 ```bash
 # Header form
@@ -183,8 +263,12 @@ curl -X POST http://localhost:4001/v1 \
   -d '{"url":"https://nowsecure.nl"}'
 ```
 
-| Method other than POST | `405 Method not allowed` |
+See [Request body options](#request-body-options-v1) and
+[Response shapes](#response-shapes-v1) for everything you can send and get back.
+
+| Situation | Response |
 |---|---|
+| Method other than POST | `405 Method not allowed` |
 | Body isn't valid JSON  | `400 Invalid JSON body` |
 | Unknown route          | `404 Not found` |
 | Scrape failed          | `500 {"error": "..."}` |
@@ -194,10 +278,11 @@ curl -X POST http://localhost:4001/v1 \
 Fetch a **Cloudflare-protected binary** — typically an image — and stream back
 the **raw bytes** (not JSON, not HTML). Same auth as `/v1`.
 
-This exists because `/v1` only ever returns text (html / cookies / json), and a
-`cf_clearance` is bound to the **solving host's IP**, so a caller on another
-machine can't reuse flareburner's cookies for its own direct image fetch. Route
-the image through `/binary` instead and flareburner fetches it from its own IP.
+**Why this exists:** `/v1` only ever returns text (html / cookies / json), and a
+`cf_clearance` cookie is bound to the **IP that solved it**. So a caller on
+another machine can't take flareburner's cookies and fetch the image directly —
+Cloudflare would challenge *their* IP. Route the image through `/binary` instead
+and flareburner fetches it from its own (already-cleared) IP.
 
 **How it resolves (cheap first, browser only if needed):**
 
@@ -221,15 +306,16 @@ The response is the raw resource with its upstream `Content-Type` and a
 `Cache-Control: public, max-age=86400` header.
 
 ```bash
-# Fetch a protected image and save it
+# Fetch a protected image and save it to disk
 curl -X POST http://localhost:4001/binary \
   -H "Content-Type: application/json" \
-  -d '{"url":"https://i.animepahe.pw/uploads/snapshots/xxxx.sm.webp"}' \
+  -d '{"url":"https://example.com/protected/image.webp"}' \
   -o image.webp
 ```
 
-| Method other than POST   | `405 Method not allowed` |
+| Situation | Response |
 |---|---|
+| Method other than POST   | `405 Method not allowed` |
 | Body isn't valid JSON    | `400 Invalid JSON body` |
 | Missing `url`            | `400 {"error":"url is required"}` |
 | Fetch failed / challenged| `502 {"error": "..."}` |
@@ -237,9 +323,70 @@ curl -X POST http://localhost:4001/binary \
 > Best for content-addressed assets (images, fonts) where the bytes matter. For
 > HTML/JSON pages use [`POST /v1`](#post-v1).
 
+### `POST /fetch`
+
+A **general-purpose Cloudflare-solving proxy**. Where `/v1` navigates a page in
+the browser and `/binary` returns raw bytes, `/fetch` runs **any HTTP request you
+describe** (method, headers, body, redirect mode) *from flareburner's host* using
+its solved clearance — and returns the status, headers, any `Set-Cookie`s, and
+the body as text.
+
+**Why this exists:** some flows are multi-step — e.g. POST a form that `302`s to a
+real media URL. The caller can't do this themselves because `cf_clearance` is
+bound to flareburner's IP + User-Agent. `/fetch` lets you drive that request
+through flareburner without ever holding the clearance yourself.
+
+It resolves the same cheap-first way as `/binary`: try the cached-clearance
+fast-path; if challenged, solve the request's origin in the browser, harvest
+fresh clearance, then replay.
+
+JSON body:
+
+| Field      | Type   | Default       | Description |
+|------------|--------|---------------|-------------|
+| `url`      | string | *(required)*  | Target URL. |
+| `method`   | string | `"GET"`       | HTTP method (`GET`, `POST`, …). |
+| `headers`  | object | —             | Extra request headers. |
+| `body`     | string | —             | Request body (for `POST`/`PUT`/…). |
+| `redirect` | string | `"follow"`    | `"follow"` or `"manual"` (use `manual` to capture a `Location` instead of following it). |
+| `timeout`  | number | `NAV_TIMEOUT` | Request + challenge timeout, in ms. |
+
+Response (JSON):
+
+```json
+{
+  "url": "https://example.com/final",
+  "status": 200,
+  "headers": { "content-type": "application/json", "...": "..." },
+  "setCookie": ["session=…; Path=/"],
+  "body": "…response body as text…",
+  "via": "fetch"
+}
+```
+
+```bash
+# Follow a form POST that redirects to the real URL
+curl -X POST http://localhost:4001/fetch \
+  -H "Content-Type: application/json" \
+  -d '{
+        "url":"https://example.com/submit",
+        "method":"POST",
+        "headers":{"Content-Type":"application/x-www-form-urlencoded"},
+        "body":"_token=abc&id=123",
+        "redirect":"manual"
+      }'
+```
+
+| Situation | Response |
+|---|---|
+| Method other than POST | `405 Method not allowed` |
+| Body isn't valid JSON  | `400 Invalid JSON body` |
+| Missing `url`          | `400 {"error":"url is required"}` |
+| Failed / challenged    | `502 {"error": "..."}` |
+
 ---
 
-## Request body options
+## Request body options (`/v1`)
 
 All fields are optional except that you'll usually want `url`.
 
@@ -258,7 +405,7 @@ All fields are optional except that you'll usually want `url`.
 
 ---
 
-## Response shapes
+## Response shapes (`/v1`)
 
 Every browser response includes `via: "browser"`; fast-path responses include
 `via: "fetch"`.
@@ -271,7 +418,7 @@ Every browser response includes `via: "browser"`; fast-path responses include
   "title": "nowSecure",
   "via": "browser",
   "userAgent": "Mozilla/5.0 …",
-  "cookies": [ { "name": "cf_clearance", "value": "…", "domain": "nowsecure.nl", … } ],
+  "cookies": [ { "name": "cf_clearance", "value": "…", "domain": "nowsecure.nl", "...": "..." } ],
   "html": "<!DOCTYPE html>…",
   "screenshot": "<base64 png, only if requested>"
 }
@@ -356,6 +503,14 @@ curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
   -d '{"url":"https://nowsecure.nl","fastPath":false}'
 
+# Fetch a protected image -> save bytes
+curl -X POST http://localhost:4001/binary -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/protected/image.webp"}' -o image.webp
+
+# General proxy: run an arbitrary request through flareburner
+curl -X POST http://localhost:4001/fetch -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/api","method":"GET"}'
+
 # With API key (if enabled)
 curl -X POST http://localhost:4001/v1 \
   -H "Content-Type: application/json" -H "X-API-Key: YOUR_KEY" \
@@ -383,7 +538,7 @@ A URL argument is required.
 
 ---
 
-## Deploying
+## Deploying to a server
 
 Two options — pick whichever fits your host:
 
@@ -464,6 +619,7 @@ especially when using `API_KEY`.
 | `setup.sh` does nothing on Windows | It's a Linux deploy script. Run `node server.js` locally; run `setup.sh` on the VPS. |
 | Browser won't launch on the VPS | Chrome needs `--no-sandbox` (already set) and Xvfb (installed by `setup.sh`). Check `journalctl -u flareburner`. |
 | Chrome crashes in Docker (`Target closed` / SIGTRAP) | `/dev/shm` too small — run with `--shm-size=1g` (compose already sets it). |
+| `node: command not found` | Node.js isn't installed or isn't on your PATH — see [Step 2](#step-2--install-the-prerequisites). |
 
 ---
 
@@ -473,12 +629,13 @@ especially when using `API_KEY`.
   retries), `navigate` (cookies/UA/headers + `waitForCloudflare` + settle),
   `buildResult` (shapes the response), `BrowserPool` (warm, queued slots),
   `fetchFastPath` (cookie-only `fetch`), `fetchBinaryFastPath` (cookie-only
-  `fetch` returning raw bytes), and `save` (CLI dump). Also runnable as a CLI.
+  `fetch` returning raw bytes), `fetchProxyFastPath` (arbitrary request via
+  fetch), and `save` (CLI dump). Also runnable as a CLI.
 - **`server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`,
-  `POST /v1` with API-key auth (fast-path-then-pool scraping), `POST /binary`
-  (clearance-reusing binary/image fetch), and graceful shutdown. Tracks the
-  last-harvested clearance so `/binary` can skip the browser.
+  `POST /v1` (fast-path-then-pool scraping), `POST /binary` (clearance-reusing
+  binary fetch), `POST /fetch` (general clearance-reusing proxy), API-key auth,
+  and graceful shutdown. Tracks the last-harvested clearance so `/binary` and
+  `/fetch` can skip the browser.
 - **`setup.sh`** — Ubuntu/Debian provisioning + `systemd` service (nohup fallback).
 - **`Dockerfile` / `docker-compose.yml`** — containerized deploy (Chrome + Xvfb baked in).
 - **`.env.example`** — documented config template.
-```
