@@ -2,10 +2,12 @@
   "name": "flareburner",
   "version": "1.0.0",
   "description": "HTTP API that uses a real Chrome browser to bypass Cloudflare challenges and return page cookies, HTML, raw binaries, or proxied requests.",
-  "main": "index.js",
+  "main": "src/index.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server.js",
+    "manage": "bash scripts/manage.sh",
+    "tui": "bash scripts/manage.sh"
   },
   "keywords": [
     "cloudflare",

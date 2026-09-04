@@ -8,12 +8,18 @@ want routed through it. Built on
 
 Use it like an API: `POST` a URL, get back the solved page.
 
-- Warm **browser pool** — Chrome stays running between requests (fast, handles concurrency).
+- **FlareSolverr v1 drop-in compatibility** (`cmd` on `POST /v1`) — works with Prowlarr, Jackett, and flaresolverr-compatible tools (`request.get`, `request.post`, `sessions.create`, etc.).
+- **Upstream Proxy Support** — route browser traffic through residential, HTTP, or SOCKS5 proxies (`PROXY_URL` or per-request/session).
+- **Slot recycling & memory leak protection** — auto-recycles browser slots after `MAX_REQUESTS_PER_SLOT` or `MAX_SLOT_LIFETIME_MS`, resetting DOM to `about:blank` between leases.
+- **Resource blocking** — optionally blocks images, fonts, and media for 2-5x faster challenge solves and major bandwidth savings.
+- **Stateful session management** — persistent browser sessions with cookies, storage, and auto-expiring TTL reaper.
+- **Prometheus operational metrics** (`GET /metrics`) — monitors HTTP requests, FlareSolverr commands, solve durations, cache hits, pool depth, and active sessions.
+- **Warm browser pool** — Chrome stays running between requests (fast, handles concurrency).
 - **Cookie reuse / fast-path** — replay a previous `cf_clearance` and skip the browser when possible.
 - **Per-request options** — choose what's returned (html / cookies / json), take screenshots, set headers, etc.
 - **Binary passthrough** (`POST /binary`) — fetch a Cloudflare-protected image (or any binary) and stream back the **raw bytes**.
 - **General proxy** (`POST /fetch`) — run any request (method/headers/body) from flareburner's host using its solved clearance.
-- **Health endpoint + optional API key** — safe to expose.
+- **Interactive TUI Manager** (`scripts/manage.sh` / `npm run manage`) — service lifecycle, logs, live metrics viewer.
 
 ---
 
@@ -25,11 +31,12 @@ Use it like an API: `POST` a URL, get back the solved page.
   - [Step 3 — Install dependencies](#step-3--install-dependencies)
   - [Step 4 — Start the server](#step-4--start-the-server)
   - [Step 5 — Make your first request](#step-5--make-your-first-request)
-- [Even easier: run with Docker](#even-easier-run-with-docker)
+- [FlareSolverr v1 drop-in API](#flaresolverr-v1-drop-in-api)
 - [Configuration (.env)](#configuration-env)
 - [The secret key (API auth)](#the-secret-key-api-auth)
 - [API reference](#api-reference)
   - [`GET /health`](#get-health)
+  - [`GET /metrics`](#get-metrics)
   - [`GET /`](#get-)
   - [`POST /v1`](#post-v1)
   - [`POST /binary`](#post-binary)
@@ -37,9 +44,13 @@ Use it like an API: `POST` a URL, get back the solved page.
 - [Request body options (`/v1`)](#request-body-options-v1)
 - [Response shapes (`/v1`)](#response-shapes-v1)
 - [Cookie reuse & the fast-path](#cookie-reuse--the-fast-path)
+- [Stateful sessions](#stateful-sessions)
+- [Upstream proxies](#upstream-proxies)
+- [Resource blocking](#resource-blocking)
 - [curl cookbook](#curl-cookbook)
 - [CLI (no server)](#cli-no-server)
 - [Deploying to a server](#deploying-to-a-server)
+  - [Interactive Manager (TUI)](#interactive-manager-tui)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
 
@@ -48,8 +59,7 @@ Use it like an API: `POST` a URL, get back the solved page.
 ## Quick start (from scratch)
 
 New here? Follow these five steps in order and you'll have a working API in a
-few minutes. (If you have Docker, the [Docker route](#even-easier-run-with-docker)
-is even shorter — it installs Chrome for you.)
+few minutes.
 
 ### Step 1 — Get the code
 
@@ -75,12 +85,12 @@ You need two things on your machine:
    - **Windows / macOS:** just install [Google Chrome](https://www.google.com/chrome/) normally.
    - **Linux server:** install `google-chrome-stable` (the [VPS script](#deploying-to-a-server) does this for you).
 
-   flareburner finds Chrome automatically (`resolveChromePath()` in `index.js`
+   flareburner finds Chrome automatically (`resolveChromePath()` in `src/index.js`
    checks the standard locations).
 
 > **On a headless Linux server** the visible browser needs a virtual display
-> (Xvfb). `puppeteer-real-browser` starts it for you; the deploy script and the
-> Docker image install the `xvfb` package.
+> (Xvfb). `puppeteer-real-browser` starts it for you; the deploy script
+> installs the `xvfb` package.
 
 ### Step 3 — Install dependencies
 
@@ -91,7 +101,7 @@ npm install
 ### Step 4 — Start the server
 
 ```bash
-node server.js
+npm start
 ```
 
 You should see:
@@ -111,8 +121,8 @@ use it. See [the secret key](#the-secret-key-api-auth) to lock it down.
 Other ways to start it:
 
 ```bash
-node server.js 8080   # override the port
-npm start             # same as: node server.js
+node src/server.js 8080   # override the port
+node src/server.js        # run directly without npm
 ```
 
 ### Step 5 — Make your first request
@@ -133,24 +143,23 @@ when you want to do more.
 
 ---
 
-## Even easier: run with Docker
+## FlareSolverr v1 drop-in API
 
-If you have Docker, you don't need to install Node or Chrome at all — they're
-baked into the image.
+`flareburner` provides **100% drop-in API compatibility** with [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) v1. You can point **Prowlarr**, **Jackett**, and any other FlareSolverr-compatible client directly to flareburner!
 
-```bash
-git clone https://github.com/arcane-nx/flareburner.git
-cd flareburner
+### Prowlarr / Jackett setup:
+- **FlareSolverr URL**: `http://<your-ip-or-localhost>:4001/v1` (or `http://<your-ip-or-localhost>:4001`)
+- **API Key**: Leave blank (unless you configured `API_KEY` in `.env`)
 
-docker compose up -d --build      # build + start in the background
-docker compose logs -f            # watch the logs
-```
+### Supported FlareSolverr commands on `POST /v1`:
 
-Then make the same [first request](#step-5--make-your-first-request) against
-`http://localhost:4001/v1`. To stop it: `docker compose down`.
-
-More Docker detail (env vars, `--shm-size`, plain `docker run`) is in
-[Deploying](#deploying-to-a-server).
+| Command | Description | Example Payload |
+|---|---|---|
+| `request.get` | Solves challenge & gets HTML/cookies | `{"cmd": "request.get", "url": "https://example.com", "maxTimeout": 60000}` |
+| `request.post` | Solves challenge & submits form POST | `{"cmd": "request.post", "url": "https://example.com", "postData": "a=1&b=2"}` |
+| `sessions.create` | Creates a persistent stateful browser session | `{"cmd": "sessions.create", "session": "my_session", "proxy": "http://..."}` |
+| `sessions.list` | Lists all active browser sessions | `{"cmd": "sessions.list"}` |
+| `sessions.destroy` | Destroys an active session and frees memory | `{"cmd": "sessions.destroy", "session": "my_session"}` |
 
 ---
 
@@ -165,14 +174,20 @@ cp .env.example .env
 Config is loaded in this order (later wins): **`.env` file → real environment
 variables → CLI port argument**.
 
-| Variable      | Default               | Description |
-|---------------|-----------------------|-------------|
-| `PORT`        | `4001`                | HTTP port. (CLI arg `node server.js <port>` overrides everything.) |
-| `API_KEY`     | *(empty)*             | If set, `POST /v1`, `/binary` and `/fetch` require this key. Empty = open. |
-| `POOL_SIZE`   | `1`                   | Number of warm Chrome instances = max concurrent browser requests. |
-| `HEADLESS`    | `false`               | Run Chrome headless. Cloudflare is harder to beat headless — keep `false` unless your target doesn't challenge. |
-| `NAV_TIMEOUT` | `60000`               | Navigation + Cloudflare-wait timeout, in ms. |
-| `DEFAULT_URL` | `https://nowsecure.nl`| URL used when a `/v1` request omits `url`. |
+| Variable | Default | Description |
+|---|---|---|
+| `PORT` | `4001` | HTTP port. (CLI arg `node src/server.js <port>` overrides everything.) |
+| `API_KEY` | *(empty)* | If set, `POST /v1`, `/binary` and `/fetch` require this key. Empty = open. |
+| `POOL_SIZE` | `1` | Number of warm Chrome instances = max concurrent browser requests. |
+| `HEADLESS` | `false` | Run Chrome headless. Cloudflare is harder to beat headless — keep `false` unless your target doesn't challenge. |
+| `NAV_TIMEOUT` | `60000` | Navigation + Cloudflare-wait timeout, in ms. |
+| `DEFAULT_URL` | `https://nowsecure.nl` | URL used when a `/v1` request omits `url`. |
+| `MAX_BODY_SIZE` | `2097152` | Maximum request body size in bytes (default 2MB). |
+| `PROXY_URL` | *(empty)* | Upstream proxy (HTTP/SOCKS5) for all outgoing Chrome traffic (`http://user:pass@host:port`). |
+| `MAX_REQUESTS_PER_SLOT` | `50` | Maximum requests before a browser slot is recycled to prevent memory leaks. |
+| `MAX_SLOT_LIFETIME_MS` | `3600000` | Maximum lifetime of a browser slot in ms (default 1 hour). |
+| `SESSION_TTL` | `900000` | Stateful session inactivity timeout in ms (default 15 minutes). |
+| `BLOCK_RESOURCES` | `false` | Block images, media, and fonts during navigation for 2-5x faster solve times. |
 
 Example `.env`:
 
@@ -183,6 +198,12 @@ POOL_SIZE=2
 HEADLESS=false
 NAV_TIMEOUT=60000
 DEFAULT_URL=https://nowsecure.nl
+MAX_BODY_SIZE=2097152
+PROXY_URL=http://user:pass@gate.smartproxy.com:7000
+MAX_REQUESTS_PER_SLOT=50
+MAX_SLOT_LIFETIME_MS=3600000
+SESSION_TTL=900000
+BLOCK_RESOURCES=false
 ```
 
 > Changes to `.env` require a **server restart** (config is read once at startup).
@@ -232,19 +253,76 @@ Base URL: `http://localhost:4001`
 
 ### `GET /health`
 
-Liveness probe + pool stats. Never requires a key.
+Liveness probe + pool stats, active sessions, proxy status, and operational metrics summary. Never requires a key.
 
 ```bash
 curl http://localhost:4001/health
 ```
 
 ```json
-{ "status": "ok", "uptimeSeconds": 42, "pool": { "size": 1, "busy": 0 } }
+{
+  "status": "ok",
+  "uptimeSeconds": 42,
+  "pool": { "size": 1, "busy": 0, "waiting": 0, "slots": [...] },
+  "sessions": { "active": 0, "list": [] },
+  "proxy": "none",
+  "clearanceCache": { "size": 1 },
+  "metrics": {
+    "totalHttpRequests": 12,
+    "totalFlareSolverrCommands": 4,
+    "lastSolveTimeSeconds": 2.314,
+    "avgSolveTimeSeconds": 2.85
+  }
+}
+```
+
+### `GET /metrics`
+
+Standard **Prometheus exposition format** metrics endpoint for Grafana, Prometheus, or direct scraping.
+
+```bash
+curl http://localhost:4001/metrics
+```
+
+```text
+# HELP flareburner_uptime_seconds Process uptime in seconds
+# TYPE flareburner_uptime_seconds gauge
+flareburner_uptime_seconds 42
+
+# HELP flareburner_http_requests_total Total number of HTTP requests processed
+# TYPE flareburner_http_requests_total counter
+flareburner_http_requests_total{endpoint="/v1",method="POST",status="200"} 10
+flareburner_http_requests_total{endpoint="/health",method="GET",status="200"} 2
+
+# HELP flareburner_flaresolverr_commands_total Total FlareSolverr commands processed
+# TYPE flareburner_flaresolverr_commands_total counter
+flareburner_flaresolverr_commands_total{cmd="request.get",status="ok"} 4
+
+# HELP flareburner_fastpath_hits_total Total fast-path cache hits and misses
+# TYPE flareburner_fastpath_hits_total counter
+flareburner_fastpath_hits_total{type="scrape",result="hit"} 3
+flareburner_fastpath_hits_total{type="scrape",result="miss"} 7
+
+# HELP flareburner_browser_pool_slots Browser pool slot status
+# TYPE flareburner_browser_pool_slots gauge
+flareburner_browser_pool_slots{state="total"} 1
+flareburner_browser_pool_slots{state="busy"} 0
+flareburner_browser_pool_slots{state="idle"} 1
+flareburner_browser_pool_slots{state="waiting"} 0
+
+# HELP flareburner_active_sessions Number of active stateful sessions
+# TYPE flareburner_active_sessions gauge
+flareburner_active_sessions 0
+
+# HELP flareburner_solve_duration_seconds FlareSolverr / scraping solve duration in seconds
+# TYPE flareburner_solve_duration_seconds gauge
+flareburner_solve_duration_seconds{type="last"} 2.314
+flareburner_solve_duration_seconds{type="avg"} 2.85
 ```
 
 ### `GET /`
 
-Self-describing usage/help, including the request body schema and whether auth is on.
+Self-describing usage/help, including the request body schema, supported FlareSolverr commands, and whether auth is on.
 
 ```bash
 curl http://localhost:4001/
@@ -464,11 +542,89 @@ Check the `via` field to see which path served it.
 
 ---
 
+## Stateful sessions
+
+Stateful sessions let you maintain a dedicated browser context (cookies, local storage, solved challenges) across multiple requests without re-solving on every call.
+
+Sessions auto-expire after `SESSION_TTL` (default 15 minutes) of inactivity.
+
+```bash
+# 1) Create a session (custom ID is optional; proxy is optional)
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "sessions.create", "session": "tracker_1"}'
+
+# 2) Execute requests inside the session
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "request.get", "url": "https://example.com/search", "session": "tracker_1"}'
+
+# 3) List active sessions
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "sessions.list"}'
+
+# 4) Destroy session when finished
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "sessions.destroy", "session": "tracker_1"}'
+```
+
+---
+
+## Upstream proxies
+
+flareburner natively supports HTTP and SOCKS5 upstream proxies (residential, datacenter, rotating).
+
+### 1. Global Proxy via `.env`
+Set `PROXY_URL` in `.env` to route all browser pool traffic through your proxy:
+```ini
+PROXY_URL=http://username:password@proxy.example.com:8080
+# Or SOCKS5:
+# PROXY_URL=socks5://127.0.0.1:9050
+```
+
+### 2. Per-session / Per-request Proxy
+You can also supply a proxy dynamically when creating a session or running a request:
+```bash
+# Create a session with its own dedicated proxy
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cmd": "sessions.create",
+    "session": "proxy_session",
+    "proxy": "http://user:pass@gate.residential.com:8000"
+  }'
+```
+
+---
+
+## Resource blocking
+
+By default, Chrome loads all images, stylesheets, fonts, and scripts to emulate a real desktop browser. If your target page doesn't strictly need fonts or images to solve the challenge, you can **block images, media, and fonts** to dramatically accelerate solve times and save bandwidth:
+
+### Global toggle (`.env`)
+```ini
+BLOCK_RESOURCES=true
+```
+
+### Per-request toggle
+```bash
+curl -X POST http://localhost:4001/v1 \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com", "blockResources": true}'
+```
+
+---
+
 ## curl cookbook
 
 ```bash
 # Health
 curl http://localhost:4001/health
+
+# Prometheus metrics
+curl http://localhost:4001/metrics
 
 # Basic scrape (full)
 curl -X POST http://localhost:4001/v1 -H "Content-Type: application/json" \
@@ -525,11 +681,11 @@ status code.
 
 ## CLI (no server)
 
-`index.js` can open a single URL directly, print the title, and dump the cookies
+`src/index.js` can open a single URL directly, print the title, and dump the cookies
 and HTML to a `json/` folder:
 
 ```bash
-node index.js https://nowsecure.nl
+node src/index.js https://nowsecure.nl
 # -> json/cookies.json   (array of cookies)
 # -> json/page.json      ({ url, html })
 ```
@@ -538,56 +694,20 @@ A URL argument is required.
 
 ---
 
-## Deploying to a server
+## Deploying to a server (Ubuntu / Debian VPS)
 
-Two options — pick whichever fits your host:
-
-| Option | Best for | Auto-restart |
-|--------|----------|--------------|
-| **A. Docker** | Anywhere with Docker (laptop, VPS, PaaS, CI). Most portable. | yes (`restart: unless-stopped`) |
-| **B. VPS script** (`setup.sh`) | A bare Ubuntu/Debian box you control. Installs onto the host directly. | yes (systemd) |
-
-### Option A — Docker
-
-Everything (Chrome, Xvfb, fonts, deps) is baked into the image.
-
-```bash
-# docker compose (recommended)
-docker compose up -d --build
-docker compose logs -f
-docker compose down
-
-# or plain docker
-docker build -t flareburner .
-docker run -d --name flareburner -p 4001:4001 --shm-size=1g flareburner
-```
-
-Configure via environment variables (see the [config table](#configuration-env)) —
-edit `docker-compose.yml`, or pass `-e`:
-
-```bash
-docker run -d -p 4001:4001 --shm-size=1g \
-  -e POOL_SIZE=2 -e API_KEY=change-me flareburner
-```
-
-> **`--shm-size=1g`** matters: Docker's default 64 MB `/dev/shm` can crash Chrome.
-> compose sets `shm_size: "1gb"` for you; with plain `docker run`, pass the flag.
-> The image also launches Chrome with `--disable-dev-shm-usage` as a safety net.
-
-### Option B — Linux VPS script (`setup.sh`)
-
-`setup.sh` provisions an **Ubuntu/Debian** host end-to-end: installs Node, Google
+`scripts/setup.sh` provisions an **Ubuntu/Debian** host end-to-end: installs Node, Google
 Chrome, Xvfb and dependencies, seeds `.env`, and runs the API as a `systemd`
 service. If systemd isn't available (e.g. a dev container / Codespace) it falls
 back to launching with `nohup`.
 
 > It only runs on Linux. On Windows/macOS it exits with a message — for local
-> dev just use `node server.js`.
+> dev just use `npm start` (or `node src/server.js`).
 
 ```bash
 # On the VPS, from the project directory:
-sudo bash setup.sh                 # serves on :4001
-PORT=8080 sudo bash setup.sh       # different port
+sudo bash scripts/setup.sh                 # serves on :4001
+PORT=8080 sudo bash scripts/setup.sh       # different port
 ```
 
 Manage the systemd service:
@@ -601,9 +721,42 @@ systemctl stop flareburner         # stop
 
 (no-systemd fallback: logs in `flareburner.log`, stop with `kill $(cat flareburner.pid)`.)
 
-For either option, open the firewall / port if reaching it externally
-(e.g. `sudo ufw allow 4001`), and ideally put it behind nginx with TLS —
-especially when using `API_KEY`.
+### Interactive Manager (TUI)
+
+flareburner includes an interactive Terminal User Interface (TUI) to easily check status, turn the service ON or OFF, restart, follow live logs, or test health:
+
+```bash
+bash scripts/manage.sh
+# (or)
+npm run manage
+# (or)
+npm run tui
+```
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                   🔥 FLAREBURNER MANAGER 🔥                  │
+│              Cloudflare-Bypass Scraping Daemon               │
+└──────────────────────────────────────────────────────────────┘
+  STATUS  : ● RUNNING (systemd)
+  PORT    : 4001
+  PID     : 12345
+  HEALTH  : Healthy (HTTP 200)
+
+┌─────────────────────────── MENU ─────────────────────────────┐
+│   [1]  Start Service                                         │
+│   [2]  Stop Service                                          │
+│   [3]  Restart Service                                       │
+│   [4]  Follow Live Logs                                      │
+│   [5]  View Last 50 Log Lines                                │
+│   [6]  Run Health Probe                                      │
+│   [q]  Exit                                                  │
+└──────────────────────────────────────────────────────────────┘
+  Navigate: [↑/↓] Arrow Keys, [Enter] Select, or press [1-6, q]
+```
+
+Open the firewall / port if reaching it externally (e.g. `sudo ufw allow 4001`),
+and ideally put it behind nginx with TLS — especially when using `API_KEY`.
 
 ---
 
@@ -616,26 +769,25 @@ especially when using `API_KEY`.
 | Stuck on `"Just a moment…"` | The challenge needs the real browser; ensure `HEADLESS=false`. Increase `timeout` for slow networks. |
 | `Attempted to use detached Frame` | Transient Cloudflare re-navigation; the server already retries this automatically. |
 | Reused cookies still get challenged | `cf_clearance` is IP+UA bound — reuse from the same IP and send the matching `userAgent`. The server falls back to the browser anyway. |
-| `setup.sh` does nothing on Windows | It's a Linux deploy script. Run `node server.js` locally; run `setup.sh` on the VPS. |
-| Browser won't launch on the VPS | Chrome needs `--no-sandbox` (already set) and Xvfb (installed by `setup.sh`). Check `journalctl -u flareburner`. |
-| Chrome crashes in Docker (`Target closed` / SIGTRAP) | `/dev/shm` too small — run with `--shm-size=1g` (compose already sets it). |
+| `scripts/setup.sh` does nothing on Windows | It's a Linux deploy script. Run `npm start` locally; run `scripts/setup.sh` on the VPS. |
+| Browser won't launch on the VPS | Chrome needs `--no-sandbox` (already set) and Xvfb (installed by `scripts/setup.sh`). Check `journalctl -u flareburner`. |
 | `node: command not found` | Node.js isn't installed or isn't on your PATH — see [Step 2](#step-2--install-the-prerequisites). |
 
 ---
 
 ## How it works
 
-- **`index.js`** — library: `resolveChromePath`, `connectBrowser` (with launch
+- **`src/index.js`** — library: `resolveChromePath`, `connectBrowser` (with launch
   retries), `navigate` (cookies/UA/headers + `waitForCloudflare` + settle),
   `buildResult` (shapes the response), `BrowserPool` (warm, queued slots),
   `fetchFastPath` (cookie-only `fetch`), `fetchBinaryFastPath` (cookie-only
   `fetch` returning raw bytes), `fetchProxyFastPath` (arbitrary request via
   fetch), and `save` (CLI dump). Also runnable as a CLI.
-- **`server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`,
+- **`src/server.js`** — HTTP layer: `.env`/config loading, `/health`, `/`,
   `POST /v1` (fast-path-then-pool scraping), `POST /binary` (clearance-reusing
   binary fetch), `POST /fetch` (general clearance-reusing proxy), API-key auth,
   and graceful shutdown. Tracks the last-harvested clearance so `/binary` and
   `/fetch` can skip the browser.
-- **`setup.sh`** — Ubuntu/Debian provisioning + `systemd` service (nohup fallback).
-- **`Dockerfile` / `docker-compose.yml`** — containerized deploy (Chrome + Xvfb baked in).
+- **`scripts/setup.sh`** — Ubuntu/Debian provisioning + `systemd` service (nohup fallback).
+- **`scripts/manage.sh`** — Interactive Terminal User Interface (TUI) to start, stop, restart, probe health, and view live logs.
 - **`.env.example`** — documented config template.

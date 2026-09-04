@@ -11,14 +11,22 @@ import { connect } from 'puppeteer-real-browser';
  * @returns {string|undefined} The resolved path to the executable, or undefined if not found.
  */
 export function resolveChromePath() {
-  const linuxCandidates = [
+  const candidates = [
+    // Linux
     '/usr/bin/google-chrome-stable',
     '/usr/bin/google-chrome',
     '/usr/bin/chromium',
     '/usr/bin/chromium-browser',
+    // macOS
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    // Windows standard locations
+    path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Google\\Chrome\\Application\\chrome.exe'),
   ];
 
-  for (const c of linuxCandidates) {
+  for (const c of candidates) {
     if (fs.existsSync(c)) {
       return c;
     }
@@ -104,15 +112,61 @@ export function sanitizeCookies(cookies, url) {
 }
 
 /**
+ * Normalizes proxy configuration (URL string or object) into a structured object.
+ *
+ * @param {string|object} [proxyInput]
+ * @returns {{host:string,port:string,protocol:string,username?:string,password?:string,url:string}|undefined}
+ */
+export function parseProxy(proxyInput) {
+  if (!proxyInput) return undefined;
+  if (typeof proxyInput === 'object') {
+    if (proxyInput.url) return parseProxy(proxyInput.url);
+    if (proxyInput.host && proxyInput.port) {
+      return {
+        host: String(proxyInput.host),
+        port: String(proxyInput.port),
+        username: proxyInput.username || '',
+        password: proxyInput.password || '',
+        protocol: (proxyInput.protocol || 'http').replace(':', '').toLowerCase(),
+        url: proxyInput.url || `${proxyInput.protocol || 'http'}://${proxyInput.host}:${proxyInput.port}`,
+      };
+    }
+  }
+  if (typeof proxyInput !== 'string' || !proxyInput.trim()) return undefined;
+  try {
+    const u = new URL(proxyInput.trim());
+    const proto = u.protocol.replace(':', '').toLowerCase();
+    const result = {
+      host: u.hostname,
+      port: u.port || (proto.startsWith('https') ? '443' : proto.startsWith('socks') ? '1080' : '80'),
+      protocol: proto,
+      username: u.username ? decodeURIComponent(u.username) : '',
+      password: u.password ? decodeURIComponent(u.password) : '',
+      url: proxyInput.trim(),
+    };
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Connects a real Chrome browser via puppeteer-real-browser, retrying through
  * the intermittent launch failures (e.g. the "reading 'on'" error).
  *
  * @param {object} [options]
  * @param {boolean} [options.headless=false]
- * @returns {Promise<import('puppeteer-real-browser').ConnectResult>}
+ * @param {string|object} [options.proxy] Optional upstream proxy (HTTP/SOCKS5).
+ * @returns {Promise<import('puppeteer-real-browser').ConnectResult & { proxy?: object }>}
  */
-export async function connectBrowser({ headless = false } = {}) {
+export async function connectBrowser({ headless = false, proxy } = {}) {
   const chromePath = resolveChromePath();
+  const parsedProxy = parseProxy(proxy);
+  const args = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+  if (parsedProxy) {
+    args.push(`--proxy-server=${parsedProxy.protocol}://${parsedProxy.host}:${parsedProxy.port}`);
+  }
+
   let browser;
   let page;
   let lastErr;
@@ -121,10 +175,16 @@ export async function connectBrowser({ headless = false } = {}) {
       ({ browser, page } = await connect({
         headless,
         turnstile: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        args,
+        proxy: parsedProxy ? {
+          host: parsedProxy.host,
+          port: parsedProxy.port,
+          username: parsedProxy.username,
+          password: parsedProxy.password,
+        } : {},
         customConfig: chromePath ? { chromePath } : {},
       }));
-      return { browser, page };
+      return { browser, page, proxy: parsedProxy };
     } catch (err) {
       lastErr = err;
       if (browser) await browser.close().catch(() => {});
@@ -148,6 +208,9 @@ export async function connectBrowser({ headless = false } = {}) {
  * @param {string} [opts.waitUntil='domcontentloaded']
  * @param {number} [opts.timeout=60000] Navigation + challenge timeout (ms).
  * @param {string} [opts.waitForSelector] Wait for this selector after load.
+ * @param {boolean|string[]} [opts.blockResources] Block media/fonts/images for speed.
+ * @param {string} [opts.method='GET'] HTTP method.
+ * @param {string} [opts.postData] Form POST payload for navigation.
  * @returns {Promise<void>}
  */
 export async function navigate(page, url, opts = {}) {
@@ -158,6 +221,9 @@ export async function navigate(page, url, opts = {}) {
     waitUntil = 'domcontentloaded',
     timeout = 60000,
     waitForSelector,
+    blockResources,
+    method = 'GET',
+    postData,
   } = opts;
 
   if (userAgent) await page.setUserAgent(userAgent);
@@ -167,14 +233,70 @@ export async function navigate(page, url, opts = {}) {
   const clean = sanitizeCookies(cookies, url);
   if (clean.length) await page.setCookie(...clean);
 
-  await page.goto(url, { waitUntil, timeout });
-  await waitForCloudflare(page, timeout);
-  // Cloudflare does a final navigation after solving; let it settle so callers
-  // don't read a detaching frame.
-  await page
-    .waitForFunction(() => document.readyState === 'complete', { timeout })
-    .catch(() => {});
-  if (waitForSelector) await page.waitForSelector(waitForSelector, { timeout });
+  // Optional resource blocking to save CPU, memory, and bandwidth
+  let cleanupInterception = null;
+  if (blockResources) {
+    const blockedSet = new Set(
+      Array.isArray(blockResources)
+        ? blockResources
+        : ['image', 'media', 'font']
+    );
+    try {
+      await page.setRequestInterception(true);
+      const handleReq = (req) => {
+        if (blockedSet.has(req.resourceType())) {
+          req.abort().catch(() => {});
+        } else {
+          req.continue().catch(() => {});
+        }
+      };
+      page.on('request', handleReq);
+      cleanupInterception = async () => {
+        page.off('request', handleReq);
+        await page.setRequestInterception(false).catch(() => {});
+      };
+    } catch {
+      // If request interception fails, continue without blocking
+    }
+  }
+
+  try {
+    if (String(method).toUpperCase() === 'POST' && postData) {
+      await page.goto('about:blank', { timeout: Math.min(10000, timeout) }).catch(() => {});
+      await page.evaluate(({ targetUrl, data }) => {
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = targetUrl;
+        if (typeof data === 'string') {
+          const params = new URLSearchParams(data);
+          for (const [k, v] of params) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = k;
+            input.value = v;
+            form.appendChild(input);
+          }
+        }
+        document.body.appendChild(form);
+        form.submit();
+      }, { targetUrl: url, data: postData });
+      await page.waitForNavigation({ waitUntil, timeout }).catch(() => {});
+    } else {
+      await page.goto(url, { waitUntil, timeout });
+    }
+
+    await waitForCloudflare(page, timeout);
+    // Cloudflare does a final navigation after solving; let it settle so callers
+    // don't read a detaching frame.
+    await page
+      .waitForFunction(() => document.readyState === 'complete', { timeout })
+      .catch(() => {});
+    if (waitForSelector) await page.waitForSelector(waitForSelector, { timeout });
+  } finally {
+    if (cleanupInterception) {
+      await cleanupInterception();
+    }
+  }
 }
 
 /** Transient navigation errors that are safe to retry on the same browser. */
@@ -252,22 +374,40 @@ export class BrowserPool {
    * @param {object} [options]
    * @param {number} [options.size=1] Number of concurrent browsers.
    * @param {boolean} [options.headless=false]
+   * @param {string|object} [options.proxy] Default upstream proxy (HTTP/SOCKS5).
+   * @param {number} [options.maxRequestsPerSlot=50] Max requests before recycling slot.
+   * @param {number} [options.maxSlotLifetimeMs=3600000] Max lifetime of slot in ms.
    */
-  constructor({ size = 1, headless = false } = {}) {
+  constructor({
+    size = 1,
+    headless = false,
+    proxy,
+    maxRequestsPerSlot = 50,
+    maxSlotLifetimeMs = 3600000,
+  } = {}) {
     this.size = Math.max(1, size);
     this.headless = headless;
+    this.proxy = proxy;
+    this.maxRequestsPerSlot = Math.max(1, maxRequestsPerSlot);
+    this.maxSlotLifetimeMs = Math.max(10, maxSlotLifetimeMs);
     this.slots = [];
     this.waiters = [];
   }
 
   async init() {
     for (let i = 0; i < this.size; i += 1) {
-      this.slots.push({ ...(await connectBrowser({ headless: this.headless })), busy: false });
+      const conn = await connectBrowser({ headless: this.headless, proxy: this.proxy });
+      this.slots.push({
+        ...conn,
+        busy: false,
+        requestCount: 0,
+        createdAt: Date.now(),
+      });
     }
     return this;
   }
 
-  /** @returns {Promise<{browser:any,page:any,busy:boolean}>} */
+  /** @returns {Promise<{browser:any,page:any,busy:boolean,requestCount:number,createdAt:number}>} */
   acquire() {
     return new Promise((resolve) => {
       const free = this.slots.find((s) => !s.busy);
@@ -280,33 +420,222 @@ export class BrowserPool {
     });
   }
 
-  /** @param {{busy:boolean}} slot */
-  release(slot) {
+  /**
+   * Releases a slot back to the pool.
+   * Resets page to about:blank to free DOM memory, and recycles the slot
+   * if it has exceeded request count or lifetime.
+   *
+   * @param {any} slot
+   */
+  async release(slot) {
+    slot.requestCount = (slot.requestCount || 0) + 1;
+    const isExpired =
+      slot.requestCount >= this.maxRequestsPerSlot ||
+      (Date.now() - (slot.createdAt || 0)) >= this.maxSlotLifetimeMs;
+
+    if (isExpired) {
+      try {
+        await this.recreate(slot);
+      } catch (err) {
+        console.error('flareburner: Error recycling expired browser slot:', err);
+      }
+    } else if (slot.page && !slot.page.isClosed()) {
+      // Clear page state between leases to free DOM & JS memory
+      await slot.page.goto('about:blank', { timeout: 5000 }).catch(() => {});
+    }
+
     const next = this.waiters.shift();
     if (next) next(slot);
     else slot.busy = false;
   }
 
-  /** Replaces a broken slot's browser, then releases it. */
-  async replace(slot) {
+  /** Recreates a broken or expired slot's browser without releasing it. */
+  async recreate(slot) {
     try {
-      await slot.browser.close();
+      if (slot.browser) await slot.browser.close();
     } catch {
       // ignore
     }
-    const fresh = await connectBrowser({ headless: this.headless });
+    const fresh = await connectBrowser({ headless: this.headless, proxy: this.proxy });
     slot.browser = fresh.browser;
     slot.page = fresh.page;
-    this.release(slot);
+    slot.proxy = fresh.proxy;
+    slot.requestCount = 0;
+    slot.createdAt = Date.now();
+  }
+
+  /** Replaces a broken slot's browser, then releases it. */
+  async replace(slot) {
+    try {
+      await this.recreate(slot);
+    } catch (err) {
+      console.error('Failed to recreate browser slot:', err);
+    } finally {
+      const next = this.waiters.shift();
+      if (next) next(slot);
+      else slot.busy = false;
+    }
   }
 
   stats() {
-    return { size: this.size, busy: this.slots.filter((s) => s.busy).length };
+    return {
+      size: this.size,
+      busy: this.slots.filter((s) => s.busy).length,
+      waiting: this.waiters.length,
+      slots: this.slots.map((s, i) => ({
+        index: i,
+        busy: s.busy,
+        requestCount: s.requestCount || 0,
+        ageSeconds: Math.round((Date.now() - (s.createdAt || Date.now())) / 1000),
+      })),
+    };
   }
 
   async close() {
-    await Promise.all(this.slots.map((s) => s.browser.close().catch(() => {})));
+    await Promise.all(this.slots.map((s) => s.browser?.close().catch(() => {})));
     this.slots = [];
+  }
+}
+
+/**
+ * Stateful session manager for persistent browser sessions.
+ * Sessions keep cookies, storage, and solver context across multiple requests,
+ * and automatically expire after a configurable TTL.
+ */
+export class SessionManager {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.ttl=900000] Session inactivity timeout in ms (default 15m).
+   * @param {boolean} [options.headless=false]
+   * @param {string|object} [options.defaultProxy]
+   */
+  constructor({ ttl = 900000, headless = false, defaultProxy } = {}) {
+    this.ttl = Math.max(10, ttl);
+    this.headless = headless;
+    this.defaultProxy = defaultProxy;
+    /** @type {Map<string, { id: string, browser: any, page: any, proxy?: any, createdAt: number, lastUsedAt: number }>} */
+    this.sessions = new Map();
+
+    // Periodic reaper for expired sessions
+    this.reaperInterval = setInterval(() => {
+      this.reapExpired();
+    }, Math.min(30000, this.ttl / 2));
+    if (this.reaperInterval.unref) this.reaperInterval.unref();
+  }
+
+  /**
+   * Creates a new session with an optional custom ID and proxy.
+   *
+   * @param {string} [customId]
+   * @param {object} [options]
+   * @param {string|object} [options.proxy]
+   * @returns {Promise<{ id: string, browser: any, page: any, proxy?: any }>}
+   */
+  async create(customId, { proxy } = {}) {
+    const id = (customId && String(customId).trim()) || `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (this.sessions.has(id)) {
+      throw new Error(`Session '${id}' already exists`);
+    }
+
+    const sessionProxy = proxy !== undefined ? proxy : this.defaultProxy;
+    const conn = await connectBrowser({ headless: this.headless, proxy: sessionProxy });
+
+    const session = {
+      id,
+      browser: conn.browser,
+      page: conn.page,
+      proxy: conn.proxy,
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+    };
+
+    this.sessions.set(id, session);
+    return session;
+  }
+
+  /**
+   * Gets a session by ID and updates its lastUsedAt timestamp.
+   *
+   * @param {string} id
+   * @returns {{ id: string, browser: any, page: any, proxy?: any }|undefined}
+   */
+  get(id) {
+    const session = this.sessions.get(id);
+    if (!session) return undefined;
+    session.lastUsedAt = Date.now();
+    return session;
+  }
+
+  /**
+   * Lists active session IDs.
+   * @returns {string[]}
+   */
+  list() {
+    return Array.from(this.sessions.keys());
+  }
+
+  /**
+   * Returns details of active sessions.
+   * @returns {object[]}
+   */
+  details() {
+    return Array.from(this.sessions.values()).map((s) => ({
+      id: s.id,
+      ageSeconds: Math.round((Date.now() - s.createdAt) / 1000),
+      idleSeconds: Math.round((Date.now() - s.lastUsedAt) / 1000),
+      proxy: s.proxy ? `${s.proxy.protocol}://${s.proxy.host}:${s.proxy.port}` : null,
+    }));
+  }
+
+  /**
+   * Destroys a session by ID.
+   *
+   * @param {string} id
+   * @returns {Promise<boolean>}
+   */
+  async destroy(id) {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    this.sessions.delete(id);
+    try {
+      if (session.browser) await session.browser.close();
+    } catch {
+      // ignore
+    }
+    return true;
+  }
+
+  /**
+   * Cleans up sessions that have been idle longer than TTL.
+   */
+  async reapExpired() {
+    const now = Date.now();
+    for (const [id, session] of this.sessions.entries()) {
+      if (now - session.lastUsedAt > this.ttl) {
+        console.log(`flareburner: Session '${id}' expired (idle > ${Math.round(this.ttl / 1000)}s), cleaning up…`);
+        this.sessions.delete(id);
+        try {
+          if (session.browser) await session.browser.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  /**
+   * Closes all sessions and stops the reaper.
+   */
+  async close() {
+    if (this.reaperInterval) clearInterval(this.reaperInterval);
+    const promises = [];
+    for (const session of this.sessions.values()) {
+      if (session.browser) {
+        promises.push(session.browser.close().catch(() => {}));
+      }
+    }
+    this.sessions.clear();
+    await Promise.all(promises);
   }
 }
 
@@ -485,10 +814,9 @@ export async function fetchProxyFastPath(url, opts = {}) {
   let res;
   let text;
   try {
-    res = await fetch(url, {
+    const fetchOpts = {
       method,
       redirect,
-      body: body != null ? body : undefined,
       signal: AbortSignal.timeout(timeout),
       headers: {
         'user-agent': userAgent || DEFAULT_UA,
@@ -496,7 +824,11 @@ export async function fetchProxyFastPath(url, opts = {}) {
         ...(mergedCookie ? { cookie: mergedCookie } : {}),
         ...passthrough,
       },
-    });
+    };
+    if (body != null && !['GET', 'HEAD'].includes(method.toUpperCase())) {
+      fetchOpts.body = body;
+    }
+    res = await fetch(url, fetchOpts);
     text = await res.text();
   } catch {
     return null; // network/timeout — let the browser try
@@ -544,12 +876,13 @@ export async function save(page, dir = 'json') {
   return { cookiesPath, pagePath };
 }
 
-// Run directly: `node index.js`
-if (import.meta.url === `file://${process.argv[1]}` ||
-    import.meta.url === new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`).href) {
+// Run directly: `node src/index.js`
+if (process.argv[1] && (
+    import.meta.url === `file://${process.argv[1]}` ||
+    import.meta.url === new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`).href)) {
   const url = process.argv[2];
   if (!url) {
-    console.error('Usage: node index.js <url>');
+    console.error('Usage: node src/index.js <url>');
     process.exit(1);
   }
   open(url)

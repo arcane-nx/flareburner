@@ -6,8 +6,8 @@
 # API as a systemd service so it stays up across reboots/crashes.
 #
 # Usage:
-#   sudo bash setup.sh            # install everything + start service on :4001
-#   PORT=8080 sudo bash setup.sh  # use a different port
+#   sudo bash scripts/setup.sh            # install everything + start service on :4001
+#   PORT=8080 sudo bash scripts/setup.sh  # use a different port
 #
 set -euo pipefail
 
@@ -18,19 +18,19 @@ SERVICE_NAME="flareburner"
 # This is a Linux (Ubuntu/Debian) deploy script. Bail clearly if it's run on
 # Windows/macOS/Git Bash, where apt-get & systemd don't exist.
 if [[ "$(uname -s 2>/dev/null)" != Linux* ]] || ! command -v apt-get >/dev/null 2>&1; then
-  echo "setup.sh deploys flareburner on an Ubuntu/Debian VPS — it can't run here." >&2
-  echo "  • Local dev (Windows/macOS): just run  node server.js" >&2
-  echo "  • Deploy: copy this project to your VPS, then run there:  sudo bash setup.sh" >&2
+  echo "scripts/setup.sh deploys flareburner on an Ubuntu/Debian VPS — it can't run here." >&2
+  echo "  • Local dev (Windows/macOS): just run  npm start (or node src/server.js)" >&2
+  echo "  • Deploy: copy this project to your VPS, then run there:  sudo bash scripts/setup.sh" >&2
   exit 1
 fi
 
-# Resolve the project directory (where this script lives) and the user that
+# Resolve the project directory (root folder, parent of scripts/) and the user that
 # should own the service (the human who invoked sudo, not root).
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_USER="${SUDO_USER:-$(whoami)}"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Please run as root: sudo bash setup.sh" >&2
+  echo "Please run as root: sudo bash scripts/setup.sh" >&2
   exit 1
 fi
 
@@ -93,7 +93,7 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=/usr/bin/node ${PROJECT_DIR}/server.js
+ExecStart=/usr/bin/node ${PROJECT_DIR}/src/server.js
 Restart=always
 RestartSec=3
 # Chrome needs a writable HOME. All app config (PORT, API_KEY, POOL_SIZE, …)
@@ -119,7 +119,7 @@ if [[ -d /run/systemd/system ]]; then
   echo "   Logs:  journalctl -u ${SERVICE_NAME} -f"
   echo "   Stop:  systemctl stop ${SERVICE_NAME}"
 else
-  # No systemd (Docker / dev container / Codespace). Run it with nohup instead.
+  # No systemd (dev container / Codespace / non-systemd Linux). Run it with nohup instead.
   echo "   systemd not available — starting with nohup (no auto-restart on reboot)."
   PID_FILE="${PROJECT_DIR}/${SERVICE_NAME}.pid"
   LOG_FILE="${PROJECT_DIR}/${SERVICE_NAME}.log"
@@ -128,7 +128,7 @@ else
     kill "$(cat "${PID_FILE}")" 2>/dev/null || true
     sleep 1
   fi
-  su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && PORT='${PORT}' nohup node server.js >> '${LOG_FILE}' 2>&1 & echo \$! > '${PID_FILE}'"
+  su - "${RUN_USER}" -c "cd '${PROJECT_DIR}' && PORT='${PORT}' nohup node src/server.js >> '${LOG_FILE}' 2>&1 & echo \$! > '${PID_FILE}'"
   sleep 2
 
   echo
